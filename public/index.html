@@ -1,0 +1,40 @@
+﻿<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta http-equiv="Content-Security-Policy" content="connect-src 'self' ws://localhost:5237;">
+
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebSocket Chat</title>
+</head>
+<body>
+<h1>WebSocket Чат</h1>
+<input type="text" id="message" placeholder="Введіть повідомлення">
+<button onclick="sendMessage()">Надіслати</button>
+<div id="chat"></div>
+
+<script>
+    var socket = new WebSocket('ws://localhost:5237');
+
+    console.log(socket)
+
+    socket.onmessage = (event) => {
+        const chat = document.getElementById('chat');
+        const message = document.createElement('div');
+        message.textContent = event.data;
+        chat.appendChild(message);
+    };
+    
+    socket.onopen = () => {
+        document.getElementById('chat').textContent = 'Підключено';
+    };
+    
+    function sendMessage() {
+        const input = document.getElementById('message');
+        socket.send(input.value);
+        input.value = '';
+        
+    }
+</script>
+</body>
+</html>

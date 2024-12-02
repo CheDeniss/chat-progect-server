@@ -1,0 +1,12 @@
+{
+  "require": {
+    "cboden/ratchet": "^0.4.4",
+    "ext-pdo": "*",
+    "firebase/php-jwt": "^6.10"
+  },
+  "autoload": {
+    "psr-4": {
+      "App\\": "src/"
+    }
+  }
+}
