@@ -19,8 +19,11 @@ class Chat implements MessageComponentInterface {
     public function __construct(PDO $db) {
         $this->clients = new SplObjectStorage; 
         $this->db = $db; // Підключення до бази
+        $this->setAllUsersStatusOffline(); // Встановлення всіх користувачів в статус "offline" про всяк випадок
+        
         echo "Сервер запущений\n";
-    }
+    }    
+    
 
     public function onOpen(ConnectionInterface $conn): void
     {
@@ -34,8 +37,8 @@ class Chat implements MessageComponentInterface {
         if ($token && $this->validateToken($token)) {
             $conn->userId = $this->getUserIdFromToken($token); // Зберігаємо ідентифікатор користувача
             $conn->userName = $this->getConnectedUserName($conn->userId); // Зберігаємо ім'я користувача
-            $this->setUserStatus($conn->userId); // Встановлюємо статус "online"
-            
+            $this->setUserStatus($conn);
+
             echo $this->colorText("onOpen:: ", "green") . "Авторизоване з`єднання: користувач {$this->colorText($conn->userName, 'white', true)} - {$this->colorText($conn->userId, 'white', true)}\n";            
         } else {
             $conn->userId = null; // Неавторизований користувач
@@ -43,7 +46,8 @@ class Chat implements MessageComponentInterface {
         }
 
         // Додаємо з'єднання до клієнтів
-        $this->clients->attach($conn);
+        $this->clients->attach($conn); 
+        
         echo $this->colorText("onOpen:: ", "green"). "Нове з'єднання: ({$conn->resourceId})\n";
     }
 
@@ -67,9 +71,7 @@ class Chat implements MessageComponentInterface {
                     $this->handleGetUsers($from);
                     break;
                 case 'logout':
-                    $this->setUserStatus($from->userId, 'offline');
-                    $from->userId = null;
-                    $from->userName = null;
+                    $this->onClose($from);      
                     break;
                 case 'getMessages':
                     $this->handleLoadMessagesIntoChatList($from, $data['data']);
@@ -95,10 +97,9 @@ class Chat implements MessageComponentInterface {
     {
         // Встановлюємо статус "offline" для користувача      
         echo $this->colorText("onClose:: ", "red").
-            "Користувач {$this->colorText($conn->userName, 'white', true)} - 
-                        {$this->colorText($conn->userId, 'white', true)} вийшов з системи\n";
+            "Користувач {$this->colorText($conn->userName, 'white', true)} - {$this->colorText($conn->userId, 'white', true)} вийшов з системи\n";
         
-        $this->setUserStatus($conn->userId, 'offline');       
+        $this->setUserStatus($conn, 'offline');       
         
         $this->clients->detach($conn);
         echo $this->colorText("onClose:: ", "red")."З'єднання {$conn->resourceId} закрите\n";
@@ -197,10 +198,11 @@ class Chat implements MessageComponentInterface {
                 ]);                
                 
                 // Встановлюємо статус "online" для користувача
-                $this->setUserStatus($user['id']);
                 $from->userId = $user['id'];
                 $from->userName = $userName;
-            } else {
+                $this->setUserStatus($from);
+            } else {                
+
                 // Якщо користувача не знайдено або пароль неправильний
                 $this->send($from, 'login', [
                     'status' => 'error',
@@ -345,20 +347,38 @@ class Chat implements MessageComponentInterface {
     }
 
 
-    private function setUserStatus($id, string $status = 'online'): void
+    private function setUserStatus($conn, string $status = 'online'): void
     {
-        $name = $this->getConnectedUserName($id);
+        $name = $conn->userName;
+        $id = $conn->userId;
         
         try {
             $stmt = $this->db->prepare('UPDATE users SET status = :status WHERE id = :id');
             $stmt->execute([':status' => $status, ':id' => $id]);
+
+            // Формуємо push-сповіщення
+            $message = json_encode([
+                'action' => 'userStatusChanged',
+                'data' => [
+                    'userId' => $id,
+                    'status' => $status
+                ]
+            ]);
+
+            // Надсилаємо сповіщення всім клієнтам
+            foreach ($this->clients as $client) {
+                if ($client !== $conn) { // Не надсилаємо самому собі
+                    $client->send($message);
+                }
+            }
             
             if($status === 'online') {
                 echo $this->colorText("setUserStatus:: ", "yellow").
-                    "Користувач {$this->colorText($name, 'white', true)} - {$this->colorText($id, 'white', true)} online\n";
-            } else{
+                    "Користувач {$this->colorText($name, "white", true)} - {$this->colorText($id, "white", true)} online\n";
+            } 
+            else{
             echo $this->colorText("setUserStatus:: ", "yellow").
-                "Користувач {$this->colorText($name, 'white', true)} - {$this->colorText($id, 'white', true)} offline\n";}
+                "Користувач {$this->colorText($name, "white", true)} - {$this->colorText($id, "white", true)} offline\n";}
 
             if ($stmt->rowCount() === 0) {
                 echo $this->colorText("setUserStatus:: ", "yellow")."Користувач із ID {$id} не знайдений.\n";
@@ -610,35 +630,18 @@ ORDER BY
         $stmt->execute($params);
 
         $this->send($from, 'createGroup', ['message' => 'Група створена']);
-    }
-
-
-    public function updateUserStatus(ConnectionInterface $conn, string $status)
+    }   
+    
+    private function setAllUsersStatusOffline(): void
     {
-        $userId = $conn->userId;
-
-        // Оновлюємо статус у базі даних
-        $query = "UPDATE users SET status = ?, last_active = GETDATE() WHERE id = ?";
-        $stmt = $this->db->prepare($query);
-        $stmt->execute([$status, $userId]);
-
-        // Формуємо push-сповіщення
-        $message = json_encode([
-            'type' => 'userStatusChanged',
-            'data' => [
-                'userId' => $userId,
-                'status' => $status
-            ]
-        ]);
-
-        // Надсилаємо сповіщення всім клієнтам
-        foreach ($this->clients as $client) {
-            if ($client !== $conn) { // Не надсилаємо самому собі
-                $client->send($message);
-            }
+        try{
+            $query = "UPDATE users SET status = 'offline'";
+            $stmt = $this->db->prepare($query);
+            $stmt->execute();
         }
-
-        echo "Статус користувача {$userId} оновлено на '{$status}'\n";
+        catch(PDOException $e){
+            echo "Помилка встановлення всіх користувачів в статус 'offline': " . $e->getMessage();
+        }     
     }
 
 }
