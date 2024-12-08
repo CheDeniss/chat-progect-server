@@ -37,7 +37,8 @@ class Chat implements MessageComponentInterface {
         if ($token && $this->validateToken($token)) {
             $conn->userId = $this->getUserIdFromToken($token); // Зберігаємо ідентифікатор користувача
             $conn->userName = $this->getConnectedUserName($conn->userId); // Зберігаємо ім'я користувача
-            $this->setUserStatus($conn);
+            $this->setUserStatus($conn);          
+            
 
             echo $this->colorText("onOpen:: ", "green") . "Авторизоване з`єднання: користувач {$this->colorText($conn->userName, 'white', true)} - {$this->colorText($conn->userId, 'white', true)}\n";            
         } else {
@@ -81,7 +82,10 @@ class Chat implements MessageComponentInterface {
                     break;
                 case 'createGroup':
                     $this->handleCreateGroup($from, $data['data']);
-                    break;                    
+                    break;  
+                case 'getUserData':
+                    $this->handleSendAuthUserData($from);
+                    break;
                 default:
                     $from->send(json_encode(['status' => 'error', 'message' => 'Невідома дія']));
                     break;
@@ -96,10 +100,14 @@ class Chat implements MessageComponentInterface {
     public function onClose(ConnectionInterface $conn): void
     {
         // Встановлюємо статус "offline" для користувача      
-        echo $this->colorText("onClose:: ", "red").
-            "Користувач {$this->colorText($conn->userName, 'white', true)} - {$this->colorText($conn->userId, 'white', true)} вийшов з системи\n";
-        
-        $this->setUserStatus($conn, 'offline');       
+        if($conn->userId && $conn->userName) {
+            echo $this->colorText("onClose:: ", "red").
+                "Користувач {$this->colorText($conn->userName, 'white', true)} - {$this->colorText($conn->userId, 'white', true)} вийшов з системи\n";
+            $this->setUserStatus($conn, 'offline');
+        }else{
+            echo $this->colorText("onClose:: ", "red").
+                "Неавторизований користувач від'єднався від сервера.\n";
+        }       
         
         $this->clients->detach($conn);
         echo $this->colorText("onClose:: ", "red")."З'єднання {$conn->resourceId} закрите\n";
@@ -194,7 +202,7 @@ class Chat implements MessageComponentInterface {
                 $this->send($from, 'login', [
                     'status' => 'success',
                     'token' => $newToken,
-                    'message' => 'Успішний вхід до системи'
+                    'message' => 'Успішний вхід до системи'                    
                 ]);                
                 
                 // Встановлюємо статус "online" для користувача
@@ -326,16 +334,29 @@ class Chat implements MessageComponentInterface {
                 $stmt->execute([$from_, $chatId, $message, null]);
             }
 
-            $newMessageToSend = $stmt->fetch(PDO::FETCH_ASSOC);
+            $newMessageToSend = $stmt->fetch(PDO::FETCH_ASSOC);      
             
-            // Додаємо поля `isMyMessage` та `senderName`
-            $newMessageToSend['isMyMessage'] = '1'; // Повідомлення завжди від поточного користувача
-            $newMessageToSend['senderName'] = $from->userName; 
-
-            $this->send($from, 'newMessage', $newMessageToSend);
-
-//            echo $this->colorText("handleCatchMessageFromClient:: ", "yellow") .
-//                "Повідомлення від користувача {$from_} до " . ($isGroup ? "чату {$chatId}" : "користувача {$chatId}") . " повернуто\n";
+           /////////////////////////////////////
+            $newMessageToSend['senderName'] = $from->userName;  // Додаємо поле `senderName`
+            $newMessageToSend['isMyMessage'] = '1'; //['isMyMessage'] = '1' - своє повідомлення
+            $this->send($from, 'newMessage', $newMessageToSend); // Відправляємо собі 
+            ////////////////////////////////////            
+            
+            if (!$isGroup) {        // Якщо це не груповий чат - ['isMyMessage'] = '0' - чуже повідомлення
+            foreach ($this->clients as $client) {
+                if ($client->userId === $chatId && $client !== $from) {
+                    $newMessageToSend['isMyMessage'] = '0';
+                    $this->send($client, "newMessage", $newMessageToSend); 
+                }
+            }
+            }else {                // Для групи відправляємо всім, окрім відправника - ['isMyMessage'] = '0' - чуже повідомлення
+                foreach ($this->clients as $client) {
+                    if ($client->userId !== $from_ && $this->isUserInChatRoom($client->userId, $chatId)) {
+                        $newMessageToSend['isMyMessage'] = '0';
+                        $this->send($client, 'newMessage', $newMessageToSend);
+                    }
+                }
+            }
 
         } catch (PDOException $e) {
             $this->send($from, 'message', ['message' => 'Помилка відправлення повідомлення: ' . $e->getMessage()], 'error');
@@ -344,6 +365,14 @@ class Chat implements MessageComponentInterface {
                 "Помилка відправлення повідомлення: {$e->getMessage()}\n";
             $this->send($from, 'message', ['message' => 'Невідома помилка: ' . $e->getMessage()], 'error');
         }
+    }
+
+    private function isUserInChatRoom($userId, $chatRoomId): bool
+    {
+        $query = "SELECT 1 FROM chat_members WHERE user_id = ? AND chat_room_id = ?";
+        $stmt = $this->db->prepare($query);
+        $stmt->execute([$userId, $chatRoomId]);
+        return (bool)$stmt->fetchColumn();
     }
 
 
@@ -642,6 +671,26 @@ ORDER BY
         catch(PDOException $e){
             echo "Помилка встановлення всіх користувачів в статус 'offline': " . $e->getMessage();
         }     
+    }
+
+    private function handleSendAuthUserData(ConnectionInterface $from): void
+    {
+        $userId = $from->userId;
+        try{
+            $query = "SELECT name, email FROM users WHERE id = ?";
+            $stmt = $this->db->prepare($query);
+            $stmt->execute([$userId]);
+            $userData = $stmt->fetch(PDO::FETCH_ASSOC);
+            if ($userData) {
+                $this->send($from, 'setUserData', $userData);
+                echo "Дані користувача відправлені\n";
+            } else {
+                $this->send($from, 'setUserData', ['error' => 'Користувача не знайдено']);
+            }
+        } catch (PDOException $e) {
+            echo "Помилка відправлення даних користувача: " . $e->getMessage();
+            $this->send($from, 'userData', ['error' => 'Помилка сервера']);
+        }
     }
 
 }
