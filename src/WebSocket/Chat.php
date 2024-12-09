@@ -86,12 +86,17 @@ class Chat implements MessageComponentInterface {
                 case 'getUserData':
                     $this->handleSendAuthUserData($from);
                     break;
+                case 'search':
+                    $this->handleSearchMessages($from, $data['data']);
+                    break;
+                case 'getGroupMembers':
+                    $this->handleGetGroupMembers($from, $data['data']);
+                    break;
                 default:
                     $from->send(json_encode(['status' => 'error', 'message' => 'Невідома дія']));
                     break;
             }
-        } else {
-            // Якщо в повідомленні немає 'action', це може бути некоректним запитом
+        } else { // Якщо action не вказаний
             $from->send(json_encode(['status' => 'error', 'message' => 'Дія не вказана']));
         }
     }
@@ -121,9 +126,8 @@ class Chat implements MessageComponentInterface {
     
     /**
      * Генерація токена
-     */
-    
-    public function generateToken(string $userId): string
+     */    
+    private function generateToken(string $userId): string
     {
         $payload = [
             'sub' => $userId,                   // ID користувача
@@ -176,6 +180,7 @@ class Chat implements MessageComponentInterface {
         echo $this->colorText("checkUserInDatabase:: ", "blue")."Користувача з ID {$userId} не знайдено.\n";
         return false;
     }    
+    
     /**
      * Обробка аввторизації
      */
@@ -301,7 +306,6 @@ class Chat implements MessageComponentInterface {
 
     /**
      * Обробка повідомлення від клієнта
-     *     
      */
     private function handleCatchMessageFromClient(ConnectionInterface $from, array $data): void
     {
@@ -349,7 +353,7 @@ class Chat implements MessageComponentInterface {
                     $this->send($client, "newMessage", $newMessageToSend); 
                 }
             }
-            }else {                // Для групи відправляємо всім, окрім відправника - ['isMyMessage'] = '0' - чуже повідомлення
+            }else {   // Для групи відправляємо всім, окрім відправника - ['isMyMessage'] = '0' - чуже повідомлення
                 foreach ($this->clients as $client) {
                     if ($client->userId !== $from_ && $this->isUserInChatRoom($client->userId, $chatId)) {
                         $newMessageToSend['isMyMessage'] = '0';
@@ -367,6 +371,9 @@ class Chat implements MessageComponentInterface {
         }
     }
 
+    /**
+     * Перевірка наявності користувача в чаті
+     */
     private function isUserInChatRoom($userId, $chatRoomId): bool
     {
         $query = "SELECT 1 FROM chat_members WHERE user_id = ? AND chat_room_id = ?";
@@ -375,7 +382,9 @@ class Chat implements MessageComponentInterface {
         return (bool)$stmt->fetchColumn();
     }
 
-
+    /**
+     * Встановлення статусу користувача
+     */
     private function setUserStatus($conn, string $status = 'online'): void
     {
         $name = $conn->userName;
@@ -417,6 +426,9 @@ class Chat implements MessageComponentInterface {
         }
     }
 
+    /**
+     * Обробка реєстрації нового користувача
+     */
     private function handleRegister(ConnectionInterface $from, array $data): void
     {
         // Перевірка наявності необхідних даних
@@ -460,6 +472,9 @@ class Chat implements MessageComponentInterface {
         }       
     }
     
+    /**
+     * Отримання імені користувача по його ID
+     */
     private function getConnectedUserName($userId): string
     {
         $smtp = $this->db->prepare('SELECT name FROM users WHERE id = ?');
@@ -476,8 +491,11 @@ class Chat implements MessageComponentInterface {
             mt_rand(0, 0x3fff) | 0x8000,
             mt_rand(0, 0xffff), mt_rand(0, 0xffff), mt_rand(0, 0xffff)
         );
-    }
-
+    }   
+    
+    /**
+     * Формування json-відповіді для клієнта та надсилання її
+     */
     private function send(ConnectionInterface $client, string $action, $data = [], string $status = 'success'): void
     {
         $message = [
@@ -489,83 +507,89 @@ class Chat implements MessageComponentInterface {
         $client->send(json_encode($message));
     }
 
+    /**
+     * Декодування токена та отримання ID користувача
+     */
     private function getUserIdFromToken($token)
     {
         $decoded = JWT::decode($token, new Key(JWT_SECRET_KEY, 'HS256'));
         return $decoded->sub;
     }
 
+    /**
+     * Обробка запиту на отримання користувачів
+     */
     private function handleGetUsers(ConnectionInterface $from): void
     {
         $currentUserId = $from->userId;
 
         $query = "
-WITH MessageUsers AS (
-    SELECT 
-        CASE 
-            WHEN sender_id = ? THEN receiver_id
-            ELSE sender_id 
-        END AS user_id,
-        created_at
-    FROM 
-        messages
-    WHERE 
-        sender_id = ? OR receiver_id = ?
-),
-LastMessages AS (
-    SELECT 
-        user_id,
-        MAX(created_at) AS last_message_time
-    FROM 
-        MessageUsers
-    GROUP BY 
-        user_id
-)
-SELECT 
-    u.id AS id, 
-    u.name AS name, 
-    COALESCE(m.message, '') AS lastMessage, 
-    lm.last_message_time AS lastMessageTime,
-    u.status,
-    0 AS isGroup
-FROM 
-    users u
-LEFT JOIN LastMessages lm ON u.id = lm.user_id
-LEFT JOIN messages m ON
-    (m.sender_id = u.id AND m.receiver_id = ? AND m.created_at = lm.last_message_time) OR
-    (m.receiver_id = u.id AND m.sender_id = ? AND m.created_at = lm.last_message_time)
-WHERE 
-    u.id != ?
-
-UNION ALL
-
-SELECT 
-    cr.id AS id,
-    cr.name AS name,
-    COALESCE(
-        (SELECT TOP 1 m.message
-         FROM messages m
-         WHERE m.chat_room_id = cr.id
-         ORDER BY m.created_at DESC), 
-        ''
-    ) AS lastMessage,
-    MAX(m.created_at) AS lastMessageTime,
-    NULL AS status,
-    1 AS isGroup
-FROM 
-    chat_rooms cr
-LEFT JOIN messages m ON m.chat_room_id = cr.id
-WHERE 
-    cr.id IN (
-        SELECT chat_room_id 
-        FROM chat_members 
-        WHERE user_id = ?
-    )
-GROUP BY 
-    cr.id, cr.name
-ORDER BY 
-    lastMessageTime DESC;
-";
+            WITH MessageUsers AS (
+                SELECT 
+                    CASE 
+                        WHEN sender_id = ? THEN receiver_id
+                        ELSE sender_id 
+                    END AS user_id,
+                    created_at
+                FROM 
+                    messages
+                WHERE 
+                    sender_id = ? OR receiver_id = ?
+            ),
+            LastMessages AS (
+                SELECT 
+                    user_id,
+                    MAX(created_at) AS last_message_time
+                FROM 
+                    MessageUsers
+                GROUP BY 
+                    user_id
+            )
+            SELECT 
+                u.id AS id, 
+                u.name AS name, 
+                COALESCE(m.message, '') AS lastMessage, 
+                lm.last_message_time AS lastMessageTime,
+                u.status,
+                0 AS isGroup
+            FROM 
+                users u
+            LEFT JOIN LastMessages lm ON u.id = lm.user_id
+            LEFT JOIN messages m ON
+                (m.sender_id = u.id AND m.receiver_id = ? AND m.created_at = lm.last_message_time) OR
+                (m.receiver_id = u.id AND m.sender_id = ? AND m.created_at = lm.last_message_time)
+            WHERE 
+                u.id != ?
+            
+            UNION ALL
+            
+            SELECT 
+                cr.id AS id,
+                cr.name AS name,
+                COALESCE(
+                    (SELECT TOP 1 m.message
+                     FROM messages m
+                     WHERE m.chat_room_id = cr.id
+                     ORDER BY m.created_at DESC), 
+                    ''
+                ) AS lastMessage,
+                MAX(m.created_at) AS lastMessageTime,
+                NULL AS status,
+                1 AS isGroup
+            FROM 
+                chat_rooms cr
+            LEFT JOIN messages m ON m.chat_room_id = cr.id
+            WHERE 
+                cr.id IN (
+                    SELECT chat_room_id 
+                    FROM chat_members 
+                    WHERE user_id = ?
+                )
+            GROUP BY 
+                cr.id, cr.name
+            ORDER BY 
+                lastMessageTime DESC;
+            ";
 
         try {
             $stmt = $this->db->prepare($query);
@@ -585,7 +609,10 @@ ORDER BY
         }
     }
 
-    function colorText(string $text, string $color, bool $bright = false): string
+    /**
+     * Колір для логування в консолі
+     */
+    private function colorText(string $text, string $color, bool $bright = false): string
     {
         $baseColors = [
             'black' => '30',
@@ -606,6 +633,9 @@ ORDER BY
         return "\033[{$colorCode}m{$text}\033[0m";
     }
 
+    /**
+     * Обробка видалення повідомлення з бази
+     */
     private function handleDeleteMessageFromBase(ConnectionInterface $from, mixed $data): void
     {
         if (!isset($data['id'])) {
@@ -628,6 +658,9 @@ ORDER BY
         }
     }
 
+    /**
+     * Обробка отримання створення нової групи
+     */
     private function handleCreateGroup(ConnectionInterface $from, mixed $data): void
     {
         if (!isset($data['name'], $data['members'])) {
@@ -635,32 +668,40 @@ ORDER BY
             return;
         }
 
-        $name = $data['name'];
-        $users = $data['members'];
-        $users[] = $from->userId; // Додаємо ініціатора групи до учасників
-        $chatRoomId = $this->generateUUID(); 
+        try {
+            $name = $data['name'];
+            $users = $data['members'];
+            $users[] = $from->userId;
+            $chatRoomId = $this->generateUUID();
 
-        // Вставка в таблицю chat_rooms
-        $query = "INSERT INTO chat_rooms (id, name) VALUES (?, ?)";
-        $stmt = $this->db->prepare($query);
-        $stmt->execute([$chatRoomId, $name]);
+            // Вставка в таблицю chat_rooms
+            $query = "INSERT INTO chat_rooms (id, name) VALUES (?, ?)";
+            $stmt = $this->db->prepare($query);
+            $stmt->execute([$chatRoomId, $name]);
 
-        // Вставки в таблицю chat_members
-        $query = "INSERT INTO chat_members (chat_room_id, user_id) VALUES ";
-        $values = [];
-        $params = [];
-        foreach ($users as $userId) {
-            $values[] = "(?, ?)";
-            $params[] = $chatRoomId; 
-            $params[] = $userId;    
+            // Вставки в таблицю chat_members
+            $query = "INSERT INTO chat_members (chat_room_id, user_id) VALUES ";
+            $values = [];
+            $params = [];
+            foreach ($users as $userId) {
+                $values[] = "(?, ?)";
+                $params[] = $chatRoomId;
+                $params[] = $userId;
+            }
+            $query .= implode(', ', $values);
+            $stmt = $this->db->prepare($query);
+            $stmt->execute($params);
+
+            $this->send($from, 'groupCreated', ['message' => 'Група створена']);
         }
-        $query .= implode(', ', $values); 
-        $stmt = $this->db->prepare($query);
-        $stmt->execute($params);
-
-        $this->send($from, 'createGroup', ['message' => 'Група створена']);
+        catch (PDOException $e) {
+            $this->send($from, 'createGroup', ['message' => 'Помилка створення групи: ' . $e->getMessage()], 'error');
+        }        
     }   
     
+    /**
+     * Встановлення всіх користувачів в статус "offline" при старті сервера про всяк випадок
+     */
     private function setAllUsersStatusOffline(): void
     {
         try{
@@ -673,6 +714,9 @@ ORDER BY
         }     
     }
 
+    /**
+     * Відправлення даних авторизованого користувача
+     */
     private function handleSendAuthUserData(ConnectionInterface $from): void
     {
         $userId = $from->userId;
@@ -693,4 +737,82 @@ ORDER BY
         }
     }
 
+    /**
+     * Обробка пошуку повідомлень
+     */
+    private function handleSearchMessages(ConnectionInterface $from, mixed $data): void    
+    {        
+        try {
+            $searchText = $data['searchText'] === '' ? '%' : "%{$data['searchText']}%";
+
+            if (!$searchText || !isset($data['chatId'], $data['isGroup'])) {
+                $this->send($from, 'searchMessages', ['message' => 'Некоректні дані для пошуку'], 'error');
+                return;
+            }
+
+            $currentUserId = $from->userId;
+            $isGroup = $data['isGroup'] === '1';
+            $chatId = $data['chatId'];
+
+            if ($isGroup) {
+                // Пошук у груповому чаті
+                $query = 'SELECT m.*, 
+                     u.name AS senderName,
+                     CASE 
+                         WHEN m.sender_id = ? THEN 1
+                         ELSE 0
+                     END AS isMyMessage 
+              FROM messages m
+              LEFT JOIN users u ON m.sender_id = u.id
+              WHERE m.chat_room_id = ? AND m.message LIKE ?
+              ORDER BY m.created_at';
+                $params = [$currentUserId, $chatId, "%$searchText%"];
+            } else {
+                // Пошук у приватному чаті
+                $query = 'SELECT m.*, u.name AS senderName,
+                        CASE 
+                            WHEN m.sender_id = ? THEN 1
+                            ELSE 0
+                        END AS isMyMessage 
+                      FROM messages m
+                      LEFT JOIN users u ON m.sender_id = u.id
+                      WHERE ((m.sender_id = ? AND m.receiver_id = ?) 
+                             OR (m.sender_id = ? AND m.receiver_id = ?))
+                        AND m.message LIKE ?
+                      ORDER BY m.created_at';
+                $params = [$currentUserId, $currentUserId, $chatId, $chatId, $currentUserId, "%$searchText%"];
+            }
+
+            $stmt = $this->db->prepare($query);
+            $stmt->execute($params);
+
+            $messages = $stmt->fetchAll(PDO::FETCH_ASSOC);
+            $this->send($from, 'setMessages', $messages);
+
+        } catch (PDOException $e) {
+            $this->send($from, 'searchMessages', ['message' => 'Помилка пошуку: ' . $e->getMessage()], 'error');
+        }
+    }
+
+    /**
+     * Обробка отримання учасників групи
+     */
+    private function handleGetGroupMembers(ConnectionInterface $from, mixed $data): void
+    {
+        if (!isset($data['chatId'])) {
+            $this->send($from, 'getGroupMembers', ['message' => 'Некоректні дані'], 'error');
+            return;
+        }
+        try {
+            $chatId = $data['chatId'];
+            $query = "SELECT u.id, u.name FROM chat_members cm JOIN users u ON cm.user_id = u.id WHERE cm.chat_room_id = ?";
+            $stmt = $this->db->prepare($query);
+            $stmt->execute([$chatId]);
+            $members = $stmt->fetchAll(PDO::FETCH_ASSOC);
+            $this->send($from, 'setGroupMembers', $members);
+        }
+        catch (PDOException $e) {
+            $this->send($from, 'getGroupMembers', ['message' => 'Помилка отримання учасників групи: ' . $e->getMessage()], 'error');
+        }          
+    }
 }
