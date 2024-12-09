@@ -52,7 +52,6 @@ class Chat implements MessageComponentInterface {
         echo $this->colorText("onOpen:: ", "green"). "Нове з'єднання: ({$conn->resourceId})\n";
     }
 
-
     public function onMessage(ConnectionInterface $from, $msg): void
     {
         $data = json_decode($msg, true);
@@ -101,7 +100,6 @@ class Chat implements MessageComponentInterface {
         }
     }
 
-
     public function onClose(ConnectionInterface $conn): void
     {
         // Встановлюємо статус "offline" для користувача      
@@ -124,62 +122,6 @@ class Chat implements MessageComponentInterface {
         $conn->close();
     }
     
-    /**
-     * Генерація токена
-     */    
-    private function generateToken(string $userId): string
-    {
-        $payload = [
-            'sub' => $userId,                   // ID користувача
-            'iat' => time(),                    // Час створення токену
-            'exp' => time() + 3600              // Термін дії токену (1 година)
-        ];
-        $alg = 'HS256';
-
-        return JWT::encode($payload, JWT_SECRET_KEY, $alg);
-    }
-
-    /**
-     * Валідація токена
-     */
-    private function validateToken(string $token): bool {
-        try {
-            // Декодування токена
-            $decoded = JWT::decode($token, new Key(JWT_SECRET_KEY, 'HS256'));
-            //var_dump($decoded);
-            
-            // Перевірка, чи не закінчився строк дії
-            if ($decoded->exp < time()) {
-                throw new \Exception('Токен прострочений');
-            }
-            
-
-            // Перевірка користувача в базі
-            return $this->checkUserInDatabase($decoded->sub);
-            
-        } catch (\Exception $e) {
-            echo "Помилка токена: {$e->getMessage()}\n";
-            return false;
-        }
-    }
-
-    /**
-     * Перевірка існування користувача в базі
-     */
-    private function checkUserInDatabase($userId): bool {
-        $stmt = $this->db->prepare('SELECT COUNT(*) FROM users WHERE id = :id');
-        $stmt->bindParam(':id', $userId, PDO::PARAM_INT);
-        $stmt->execute();
-        $count = $stmt->fetchColumn();
-
-        if ($count > 0) {
-            echo $this->colorText("checkUserInDatabase:: ", "blue")."Користувач з ID {$userId} знайдений.\n";
-            return true;
-        }
-
-        echo $this->colorText("checkUserInDatabase:: ", "blue")."Користувача з ID {$userId} не знайдено.\n";
-        return false;
-    }    
     
     /**
      * Обробка аввторизації
@@ -231,14 +173,13 @@ class Chat implements MessageComponentInterface {
                 ],
                 'error');
         }
-    }    
-    
+    }        
     
     /**
      * Обробка надсилань повідомлень чату
      */
     private function handleLoadMessagesIntoChatList(ConnectionInterface $from, mixed $data): void
-    {
+    {       
         try {
             if (isset($data['chatId']) && $data['isGroup'] === '0') {
                 // Індивідуальний чат
@@ -301,8 +242,7 @@ class Chat implements MessageComponentInterface {
             echo $this->colorText("Невідома помилка: ", "red") . $e->getMessage() . "\n";
             $this->send($from, 'getMessages', ['message' => 'Невідома помилка: ' . $e->getMessage()], 'error');
         }
-    }
-    
+    }    
 
     /**
      * Обробка повідомлення від клієнта
@@ -310,13 +250,11 @@ class Chat implements MessageComponentInterface {
     private function handleCatchMessageFromClient(ConnectionInterface $from, array $data): void
     {
         //var_dump($data);
-
+        if (!isset($data['message'], $data['chatId'], $data['isGroup'])) {
+            $this->send($from, 'message', ['message' => 'Некоректні дані'], 'error');
+            return;
+        }
         try {
-            if (!isset($data['message'], $data['chatId'], $data['isGroup'])) {
-                $this->send($from, 'message', ['message' => 'Некоректні дані'], 'error');
-                return;
-            }
-
             $message = $data['message'];
             $chatId = $data['chatId'];
             $isGroup = $data['isGroup'] === '1'; // Груповий чат чи ні
@@ -369,62 +307,7 @@ class Chat implements MessageComponentInterface {
                 "Помилка відправлення повідомлення: {$e->getMessage()}\n";
             $this->send($from, 'message', ['message' => 'Невідома помилка: ' . $e->getMessage()], 'error');
         }
-    }
-
-    /**
-     * Перевірка наявності користувача в чаті
-     */
-    private function isUserInChatRoom($userId, $chatRoomId): bool
-    {
-        $query = "SELECT 1 FROM chat_members WHERE user_id = ? AND chat_room_id = ?";
-        $stmt = $this->db->prepare($query);
-        $stmt->execute([$userId, $chatRoomId]);
-        return (bool)$stmt->fetchColumn();
-    }
-
-    /**
-     * Встановлення статусу користувача
-     */
-    private function setUserStatus($conn, string $status = 'online'): void
-    {
-        $name = $conn->userName;
-        $id = $conn->userId;
-        
-        try {
-            $stmt = $this->db->prepare('UPDATE users SET status = :status WHERE id = :id');
-            $stmt->execute([':status' => $status, ':id' => $id]);
-
-            // Формуємо push-сповіщення
-            $message = json_encode([
-                'action' => 'userStatusChanged',
-                'data' => [
-                    'userId' => $id,
-                    'status' => $status
-                ]
-            ]);
-
-            // Надсилаємо сповіщення всім клієнтам
-            foreach ($this->clients as $client) {
-                if ($client !== $conn) { // Не надсилаємо самому собі
-                    $client->send($message);
-                }
-            }
-            
-            if($status === 'online') {
-                echo $this->colorText("setUserStatus:: ", "yellow").
-                    "Користувач {$this->colorText($name, "white", true)} - {$this->colorText($id, "white", true)} online\n";
-            } 
-            else{
-            echo $this->colorText("setUserStatus:: ", "yellow").
-                "Користувач {$this->colorText($name, "white", true)} - {$this->colorText($id, "white", true)} offline\n";}
-
-            if ($stmt->rowCount() === 0) {
-                echo $this->colorText("setUserStatus:: ", "yellow")."Користувач із ID {$id} не знайдений.\n";
-            }
-        } catch (PDOException $e) {
-            echo $this->colorText("setUserStatus:: ", "cyan")."Помилка встановлення статусу {$status} для користувача {$id}: {$e->getMessage()}\n";
-        }
-    }
+    }  
 
     /**
      * Обробка реєстрації нового користувача
@@ -470,51 +353,7 @@ class Chat implements MessageComponentInterface {
         } catch (PDOException $e) {
             $this->send($from, 'register', ['message' => 'Помилка реєстрації: ' . $e->getMessage()], 'error');
         }       
-    }
-    
-    /**
-     * Отримання імені користувача по його ID
-     */
-    private function getConnectedUserName($userId): string
-    {
-        $smtp = $this->db->prepare('SELECT name FROM users WHERE id = ?');
-        $smtp->execute([$userId]);
-        return $smtp->fetchColumn();
-    }
-  
-    private function generateUUID(): string {
-        return sprintf(
-            '%04x%04x-%04x-%04x-%04x-%04x%04x%04x',
-            mt_rand(0, 0xffff), mt_rand(0, 0xffff),
-            mt_rand(0, 0xffff),
-            mt_rand(0, 0x0fff) | 0x4000,
-            mt_rand(0, 0x3fff) | 0x8000,
-            mt_rand(0, 0xffff), mt_rand(0, 0xffff), mt_rand(0, 0xffff)
-        );
-    }   
-    
-    /**
-     * Формування json-відповіді для клієнта та надсилання її
-     */
-    private function send(ConnectionInterface $client, string $action, $data = [], string $status = 'success'): void
-    {
-        $message = [
-            'status' => $status,
-            'action' => $action,
-            'data' => $data,
-        ];
-
-        $client->send(json_encode($message));
-    }
-
-    /**
-     * Декодування токена та отримання ID користувача
-     */
-    private function getUserIdFromToken($token)
-    {
-        $decoded = JWT::decode($token, new Key(JWT_SECRET_KEY, 'HS256'));
-        return $decoded->sub;
-    }
+    }  
 
     /**
      * Обробка запиту на отримання користувачів
@@ -607,31 +446,7 @@ class Chat implements MessageComponentInterface {
         } catch (PDOException $e) {
             echo "Помилка отримання користувачів: " . $e->getMessage();
         }
-    }
-
-    /**
-     * Колір для логування в консолі
-     */
-    private function colorText(string $text, string $color, bool $bright = false): string
-    {
-        $baseColors = [
-            'black' => '30',
-            'red' => '31',
-            'green' => '32',
-            'yellow' => '33',
-            'blue' => '34',
-            'purple' => '35',
-            'cyan' => '36',
-            'white' => '37',
-        ];
-
-        $colorCode = $baseColors[$color] ?? '0';
-        if ($bright) {
-            $colorCode = (string)((int)$colorCode + 60);
-        }
-
-        return "\033[{$colorCode}m{$text}\033[0m";
-    }
+    }  
 
     /**
      * Обробка видалення повідомлення з бази
@@ -697,22 +512,7 @@ class Chat implements MessageComponentInterface {
         catch (PDOException $e) {
             $this->send($from, 'createGroup', ['message' => 'Помилка створення групи: ' . $e->getMessage()], 'error');
         }        
-    }   
-    
-    /**
-     * Встановлення всіх користувачів в статус "offline" при старті сервера про всяк випадок
-     */
-    private function setAllUsersStatusOffline(): void
-    {
-        try{
-            $query = "UPDATE users SET status = 'offline'";
-            $stmt = $this->db->prepare($query);
-            $stmt->execute();
-        }
-        catch(PDOException $e){
-            echo "Помилка встановлення всіх користувачів в статус 'offline': " . $e->getMessage();
-        }     
-    }
+    }      
 
     /**
      * Відправлення даних авторизованого користувача
@@ -814,5 +614,206 @@ class Chat implements MessageComponentInterface {
         catch (PDOException $e) {
             $this->send($from, 'getGroupMembers', ['message' => 'Помилка отримання учасників групи: ' . $e->getMessage()], 'error');
         }          
+    }   
+    
+    
+    /*****************************************************************************************/
+
+    /**
+     * Генерація токена
+     */
+    private function generateToken(string $userId): string
+    {
+        $payload = [
+            'sub' => $userId,                   // ID користувача
+            'iat' => time(),                    // Час створення токену
+            'exp' => time() + 3600              // Термін дії токену (1 година)
+        ];
+        $alg = 'HS256';
+
+        return JWT::encode($payload, JWT_SECRET_KEY, $alg);
+    }
+
+    /**
+     * Валідація токена
+     */
+    private function validateToken(string $token): bool {
+        try {
+            // Декодування токена
+            $decoded = JWT::decode($token, new Key(JWT_SECRET_KEY, 'HS256'));
+            //var_dump($decoded);
+
+            // Перевірка, чи не закінчився строк дії
+            if ($decoded->exp < time()) {
+                throw new \Exception('Токен прострочений');
+            }
+
+
+            // Перевірка користувача в базі
+            return $this->checkUserInDatabase($decoded->sub);
+
+        } catch (\Exception $e) {
+            echo "Помилка токена: {$e->getMessage()}\n";
+            return false;
+        }
+    }
+
+    /**
+     * Перевірка існування користувача в базі
+     */
+    private function checkUserInDatabase($userId): bool {
+        $stmt = $this->db->prepare('SELECT COUNT(*) FROM users WHERE id = :id');
+        $stmt->bindParam(':id', $userId, PDO::PARAM_INT);
+        $stmt->execute();
+        $count = $stmt->fetchColumn();
+
+        if ($count > 0) {
+            echo $this->colorText("checkUserInDatabase:: ", "blue")."Користувач з ID {$userId} знайдений.\n";
+            return true;
+        }
+
+        echo $this->colorText("checkUserInDatabase:: ", "blue")."Користувача з ID {$userId} не знайдено.\n";
+        return false;
+    }
+    
+    /**
+     * Встановлення всіх користувачів в статус "offline" при старті сервера про всяк випадок
+     */
+    private function setAllUsersStatusOffline(): void
+    {
+        try{
+            $query = "UPDATE users SET status = 'offline'";
+            $stmt = $this->db->prepare($query);
+            $stmt->execute();
+        }
+        catch(PDOException $e){
+            echo "Помилка встановлення всіх користувачів в статус 'offline': " . $e->getMessage();
+        }
+    }
+
+    /**
+     * Отримання імені користувача по його ID
+     */
+    private function getConnectedUserName($userId): string
+    {
+        $smtp = $this->db->prepare('SELECT name FROM users WHERE id = ?');
+        $smtp->execute([$userId]);
+        return $smtp->fetchColumn();
+    }
+
+    /**
+     * Декодування токена та отримання ID користувача
+     */
+    private function getUserIdFromToken($token)
+    {
+        $decoded = JWT::decode($token, new Key(JWT_SECRET_KEY, 'HS256'));
+        return $decoded->sub;
+    }
+    
+    /**
+     * Колір для логування в консолі
+     */
+    private function colorText(string $text, string $color, bool $bright = false): string
+    {
+        $baseColors = [
+            'black' => '30',
+            'red' => '31',
+            'green' => '32',
+            'yellow' => '33',
+            'blue' => '34',
+            'purple' => '35',
+            'cyan' => '36',
+            'white' => '37',
+        ];
+
+        $colorCode = $baseColors[$color] ?? '0';
+        if ($bright) {
+            $colorCode = (string)((int)$colorCode + 60);
+        }
+
+        return "\033[{$colorCode}m{$text}\033[0m";
+    }
+
+    /**
+     * Генерація UUID
+     */
+    private function generateUUID(): string {
+        return sprintf(
+            '%04x%04x-%04x-%04x-%04x-%04x%04x%04x',
+            mt_rand(0, 0xffff), mt_rand(0, 0xffff),
+            mt_rand(0, 0xffff),
+            mt_rand(0, 0x0fff) | 0x4000,
+            mt_rand(0, 0x3fff) | 0x8000,
+            mt_rand(0, 0xffff), mt_rand(0, 0xffff), mt_rand(0, 0xffff)
+        );
+    }
+    
+    /**
+     * Перевірка наявності користувача в чаті
+     */
+    private function isUserInChatRoom($userId, $chatRoomId): bool
+    {
+        $query = "SELECT 1 FROM chat_members WHERE user_id = ? AND chat_room_id = ?";
+        $stmt = $this->db->prepare($query);
+        $stmt->execute([$userId, $chatRoomId]);
+        return (bool)$stmt->fetchColumn();
+    }
+
+    /**
+     * Встановлення статусу користувача
+     */
+    private function setUserStatus($conn, string $status = 'online'): void
+    {
+        $name = $conn->userName;
+        $id = $conn->userId;
+
+        try {
+            $stmt = $this->db->prepare('UPDATE users SET status = :status WHERE id = :id');
+            $stmt->execute([':status' => $status, ':id' => $id]);
+
+            // Формуємо push-сповіщення
+            $message = json_encode([
+                'action' => 'userStatusChanged',
+                'data' => [
+                    'userId' => $id,
+                    'status' => $status
+                ]
+            ]);
+
+            // Надсилаємо сповіщення всім клієнтам
+            foreach ($this->clients as $client) {
+                if ($client !== $conn) { // Не надсилаємо самому собі
+                    $client->send($message);
+                }
+            }
+
+            if($status === 'online') {
+                echo $this->colorText("setUserStatus:: ", "yellow").
+                    "Користувач {$this->colorText($name, "white", true)} - {$this->colorText($id, "white", true)} online\n";
+            }
+            else{
+                echo $this->colorText("setUserStatus:: ", "yellow").
+                    "Користувач {$this->colorText($name, "white", true)} - {$this->colorText($id, "white", true)} offline\n";}
+
+            if ($stmt->rowCount() === 0) {
+                echo $this->colorText("setUserStatus:: ", "yellow")."Користувач із ID {$id} не знайдений.\n";
+            }
+        } catch (PDOException $e) {
+            echo $this->colorText("setUserStatus:: ", "cyan")."Помилка встановлення статусу {$status} для користувача {$id}: {$e->getMessage()}\n";
+        }
+    }
+
+    /**
+     * Формування json-відповіді для клієнта та надсилання її
+     */
+    private function send(ConnectionInterface $client, string $action, $data = [], string $status = 'success'): void
+    {
+        $message = [
+            'status' => $status,
+            'action' => $action,
+            'data' => $data,
+        ];
+
+        $client->send(json_encode($message));
     }
 }
