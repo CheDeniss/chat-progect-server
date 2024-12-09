@@ -22,8 +22,7 @@ class Chat implements MessageComponentInterface {
         $this->setAllUsersStatusOffline(); // Встановлення всіх користувачів в статус "offline" про всяк випадок
         
         echo "Сервер запущений\n";
-    }    
-    
+    }        
 
     public function onOpen(ConnectionInterface $conn): void
     {
@@ -37,6 +36,7 @@ class Chat implements MessageComponentInterface {
         if ($token && $this->validateToken($token)) {
             $conn->userId = $this->getUserIdFromToken($token); // Зберігаємо ідентифікатор користувача
             $conn->userName = $this->getConnectedUserName($conn->userId); // Зберігаємо ім'я користувача
+            $conn->token = $token; // Зберігаємо токен
             $this->setUserStatus($conn);          
             
 
@@ -56,6 +56,19 @@ class Chat implements MessageComponentInterface {
     {
         $data = json_decode($msg, true);
 
+        if ($data['action'] !== 'register' && 
+            $data['action'] !== 'login' && 
+            !$this->validateToken($from->token ?? 'login', false)) {
+            echo $this->colorText("onMessage:: ", "red")."Мабуть термін токена закінчився....\n";
+            $this->send($from, 'tokenInvalid', ['message' => 'Мабуть термін токена закінчився....'], 'error');
+            $this->setUserStatus($from, 'offline');
+            $from->userId = null;
+            $from->userName = null;
+            $from->token = null;
+
+            return;
+        }        
+
         if (isset($data['action'])) {
             switch ($data['action']) {
                 case 'register':
@@ -71,7 +84,7 @@ class Chat implements MessageComponentInterface {
                     $this->handleGetUsers($from);
                     break;
                 case 'logout':
-                    $this->onClose($from);      
+                    $this->handleLogout($from);
                     break;
                 case 'getMessages':
                     $this->handleLoadMessagesIntoChatList($from, $data['data']);
@@ -92,36 +105,26 @@ class Chat implements MessageComponentInterface {
                     $this->handleGetGroupMembers($from, $data['data']);
                     break;
                 default:
-                    $from->send(json_encode(['status' => 'error', 'message' => 'Невідома дія']));
+                    $this->send( $from, 'error', ['message' => 'Невідома дія.'], 'error');
                     break;
             }
         } else { // Якщо action не вказаний
-            $from->send(json_encode(['status' => 'error', 'message' => 'Дія не вказана']));
+            $this->send( $from, 'error', ['message' => 'Дія не вказана.'], 'error');
         }
     }
 
     public function onClose(ConnectionInterface $conn): void
     {
-        // Встановлюємо статус "offline" для користувача      
-        if($conn->userId && $conn->userName) {
-            echo $this->colorText("onClose:: ", "red").
-                "Користувач {$this->colorText($conn->userName, 'white', true)} - {$this->colorText($conn->userId, 'white', true)} вийшов з системи\n";
-            $this->setUserStatus($conn, 'offline');
-        }else{
-            echo $this->colorText("onClose:: ", "red").
-                "Неавторизований користувач від'єднався від сервера.\n";
-        }       
-        
-        $this->clients->detach($conn);
-        echo $this->colorText("onClose:: ", "red")."З'єднання {$conn->resourceId} закрите\n";
+        $connId = $conn->resourceId;
+        $this->cleanupConnection($conn); // Видалення з'єднання зі списку та встановлення статусу "offline"
+        echo $this->colorText("onClose:: ", "red")."З'єднання {$connId} закрите\n";
     }
 
     public function onError(ConnectionInterface $conn, \Exception $e): void
     {
         echo $this->colorText("onClose:: ", "red")."Помилка: {$e->getMessage()}\n";
         $conn->close();
-    }
-    
+    }    
     
     /**
      * Обробка аввторизації
@@ -155,6 +158,7 @@ class Chat implements MessageComponentInterface {
                 // Встановлюємо статус "online" для користувача
                 $from->userId = $user['id'];
                 $from->userName = $userName;
+                $from->token = $newToken;
                 $this->setUserStatus($from);
             } else {                
 
@@ -340,6 +344,7 @@ class Chat implements MessageComponentInterface {
             $token = $this->generateToken($id);
             $from->userId = $id;
             $from->userName = $userName;
+            $from->token = $token;
 
             // Відправляємо токен і повідомлення про успішну реєстрацію
             $this->send($from, 'login', [
@@ -527,7 +532,7 @@ class Chat implements MessageComponentInterface {
             $userData = $stmt->fetch(PDO::FETCH_ASSOC);
             if ($userData) {
                 $this->send($from, 'setUserData', $userData);
-                echo "Дані користувача відправлені\n";
+                echo $this->colorText("handleSendAuthUserData:: ", "blue")."Дані користувача відправлені\n";
             } else {
                 $this->send($from, 'setUserData', ['error' => 'Користувача не знайдено']);
             }
@@ -542,6 +547,7 @@ class Chat implements MessageComponentInterface {
      */
     private function handleSearchMessages(ConnectionInterface $from, mixed $data): void    
     {        
+        //var_dump($data);
         try {
             $searchText = $data['searchText'] === '' ? '%' : "%{$data['searchText']}%";
 
@@ -614,9 +620,22 @@ class Chat implements MessageComponentInterface {
         catch (PDOException $e) {
             $this->send($from, 'getGroupMembers', ['message' => 'Помилка отримання учасників групи: ' . $e->getMessage()], 'error');
         }          
-    }   
-    
-    
+    }
+
+    /**   
+     * Обробка виходу користувача
+     */
+    private function handleLogout($from): void{
+        $this->setUserStatus($from, 'offline');
+        $from->userId = null;
+        $from->userName = null;
+        $from->token = null;
+        $this->send($from, 'logout', ['message' => 'Вихід успішний']);
+        
+        echo $this->colorText("handleLogout:: ", "red")."З'єднання {$from->resourceId} - користувач вийшов.\n";
+    }
+
+
     /*****************************************************************************************/
 
     /**
@@ -627,7 +646,7 @@ class Chat implements MessageComponentInterface {
         $payload = [
             'sub' => $userId,                   // ID користувача
             'iat' => time(),                    // Час створення токену
-            'exp' => time() + 3600              // Термін дії токену (1 година)
+            'exp' => time() + 10 * 60            // Час закінчення через 3 хвилини
         ];
         $alg = 'HS256';
 
@@ -637,25 +656,32 @@ class Chat implements MessageComponentInterface {
     /**
      * Валідація токена
      */
-    private function validateToken(string $token): bool {
+    private function validateToken(string $token, bool $isLogin = true): bool
+    {
+        //echo $this->colorText("validateToken:: ", "blue")."Токен: {$token}\n";
+        if($token === 'login') {
+            return true;
+        }
+        
         try {
-            // Декодування токена
             $decoded = JWT::decode($token, new Key(JWT_SECRET_KEY, 'HS256'));
             //var_dump($decoded);
 
-            // Перевірка, чи не закінчився строк дії
             if ($decoded->exp < time()) {
                 throw new \Exception('Токен прострочений');
             }
 
-
-            // Перевірка користувача в базі
-            return $this->checkUserInDatabase($decoded->sub);
+            if ($isLogin) {
+                return $this->checkUserInDatabase($decoded->sub);
+            }
 
         } catch (\Exception $e) {
             echo "Помилка токена: {$e->getMessage()}\n";
+            
             return false;
         }
+        
+        return true;
     }
 
     /**
@@ -816,4 +842,21 @@ class Chat implements MessageComponentInterface {
 
         $client->send(json_encode($message));
     }
+
+    /**
+     * Дії перед закриттям з'єднання
+     */
+    private function cleanupConnection(ConnectionInterface $conn): void
+    {
+        if ($conn->userId && $conn->userName) {
+            echo $this->colorText("onClose:: ", "red") .
+                "Користувач {$this->colorText($conn->userName, 'white', true)} - {$this->colorText($conn->userId, 'white', true)} виходить.\n";
+            $this->setUserStatus($conn, 'offline');
+        }else{
+            echo $this->colorText("onClose:: ", "white").
+                "Неавторизований користувач від'єднався від сервера.\n";
+        }
+        
+        $this->clients->detach($conn);       
+    }  
 }
